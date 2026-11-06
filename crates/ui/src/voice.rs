@@ -53,7 +53,8 @@ impl MessagingUi {
 						StageFocus::LocalScreen => {
 							self.screen.context
 								== Some((state.generation, call.channel, call.request))
-								&& self.screen.busy && self.screen.preview.is_some()
+								&& self.screen.busy && (self.screen.preview.is_some()
+								|| self.screen.preview_paused)
 						}
 						StageFocus::Stream(user) => call.watching == Some(*user),
 						StageFocus::Participant(_) => false,
@@ -87,7 +88,7 @@ impl MessagingUi {
 				let rect = egui::Rect::from_min_size(screen.min, screen.size());
 				ui.painter().rect_filled(rect, 0, STAGE_FILL);
 				match focus {
-					StageFocus::LocalScreen => self.screen_tile(ui, rect, false),
+					StageFocus::LocalScreen => self.screen_tile(ui, state, rect, false, 56.0),
 					StageFocus::Stream(user) => {
 						self.stream_tile(ui, state, rect, channel, user, true)
 					}
@@ -1022,7 +1023,7 @@ impl MessagingUi {
 		if call.is_some_and(|call| {
 			self.screen.context == Some((state.generation, channel, call.request))
 				&& self.screen.busy
-				&& self.screen.preview.is_some()
+				&& (self.screen.preview.is_some() || self.screen.preview_paused)
 		}) {
 			tiles.push(Tile::LocalScreen);
 		}
@@ -1195,7 +1196,7 @@ impl MessagingUi {
 
 	fn tile_has_video(&self, state: &State, channel: Id, tile: &Tile<'_>) -> bool {
 		match tile {
-			Tile::LocalScreen => self.screen.preview.is_some(),
+			Tile::LocalScreen => self.screen.preview.is_some() || self.screen.preview_paused,
 			Tile::Stream(streamer) => self.watching(state, channel, *streamer),
 			Tile::Participant(entry) => {
 				let own = state
@@ -1242,7 +1243,7 @@ impl MessagingUi {
 		let compact = rect.height() < 132.0;
 		let hint = match tile {
 			Tile::LocalScreen => {
-				self.screen_tile(ui, rect, compact);
+				self.screen_tile(ui, state, rect, compact, 0.0);
 				self.screen
 					.capture_status
 					.unwrap_or("Your screen · local preview")
@@ -1315,7 +1316,20 @@ impl MessagingUi {
 		None
 	}
 
-	fn screen_tile(&self, ui: &mut egui::Ui, rect: egui::Rect, compact: bool) {
+	fn screen_tile(
+		&mut self,
+		ui: &mut egui::Ui,
+		state: &State,
+		rect: egui::Rect,
+		compact: bool,
+		// Right inset for the viewer chip: fullscreen reserves room for its exit button.
+		viewer_inset: f32,
+	) {
+		if self.screen.preview_paused {
+			Self::paint_paused_preview(ui, rect);
+			self.viewer_badge(ui, state, rect, viewer_inset);
+			return;
+		}
 		let content = self
 			.screen
 			.preview
@@ -1332,6 +1346,194 @@ impl MessagingUi {
 		if !compact {
 			name_badge(ui, content, "Your screen", None, self.badge_opacity());
 		}
+		self.viewer_badge(ui, state, content, viewer_inset);
+	}
+
+	/// Ask once per roster for the watchers this device cannot name from its own caches.
+	///
+	/// This uses the same lookup the roster draws with, so a name shown here is never fetched
+	/// and a skipped name is always one the row can actually resolve.
+	pub(crate) fn request_missing_viewers(
+		&mut self,
+		state: &mut State,
+		commands: &mut Vec<Command>,
+	) {
+		let Some(audience) = &state.voice.audience else {
+			return;
+		};
+		let channel = state.voice.active.as_ref().map(|call| call.channel);
+		let guild = state.voice.active.as_ref().and_then(|call| call.guild);
+		let unresolved: Vec<Id> = audience
+			.ids
+			.iter()
+			.copied()
+			.filter(|id| !audience.users.iter().any(|user| user.id == *id))
+			.filter(|id| {
+				channel.is_none_or(|channel| viewer_user(state, channel, guild, *id).is_none())
+			})
+			.collect();
+		if let Some(command) = state.request_stream_viewer_users(&unresolved) {
+			commands.push(command);
+		}
+	}
+
+	/// Top-right watcher chip on this device's own share; a click opens the viewer roster.
+	/// `inset` keeps the chip clear of chrome sharing that corner (the fullscreen exit button).
+	fn viewer_badge(&mut self, ui: &mut egui::Ui, state: &State, content: egui::Rect, inset: f32) {
+		let Some(audience) = &state.voice.audience else {
+			return;
+		};
+		if self.badge_opacity() <= 0.0 || content.width() < 120.0 || content.height() < 56.0 {
+			return;
+		}
+		let label = if audience.count == 0 {
+			crate::i18n::translate("voice-audience-no-viewers")
+		} else {
+			crate::i18n::translate_count("voice-audience-viewers", usize::from(audience.count), &[])
+		};
+		let opacity = self.badge_opacity();
+		let font = egui::FontId::new(12.0, design::medium_family(ui.ctx()));
+		let galley = ui.painter().layout_no_wrap(label.clone(), font, STAGE_TEXT);
+		let size = egui::vec2(galley.size().x + 40.0, 24.0);
+		let rect = egui::Rect::from_min_size(
+			content.right_top() + egui::vec2(-inset - 8.0 - size.x, 8.0),
+			size,
+		);
+		let response = ui.interact(
+			rect,
+			ui.scope_id().with("voice-viewer-badge"),
+			egui::Sense::click(),
+		);
+		response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &label));
+		let mut painter = ui.painter().clone();
+		painter.multiply_opacity(opacity);
+		painter.rect_filled(
+			rect,
+			6,
+			egui::Color32::from_black_alpha(if response.hovered() { 200 } else { 160 }),
+		);
+		crate::icons::paint(
+			&painter,
+			crate::icons::Icon::People,
+			egui::Rect::from_center_size(
+				egui::pos2(rect.left() + 16.0, rect.center().y),
+				egui::Vec2::splat(14.0),
+			),
+			STAGE_TEXT,
+		);
+		painter.galley(
+			egui::pos2(rect.left() + 30.0, rect.center().y - galley.size().y * 0.5),
+			galley,
+			STAGE_TEXT,
+		);
+		egui::Popup::menu(&response).show(|ui| self.viewer_roster(ui, state));
+	}
+
+	/// Bounded watcher list: names and avatars already known, then any fetched identities.
+	fn viewer_roster(&mut self, ui: &mut egui::Ui, state: &State) {
+		let Some(audience) = &state.voice.audience else {
+			return;
+		};
+		ui.set_width(240.0);
+		ui.spacing_mut().item_spacing.y = 6.0;
+		ui.label(design::medium(
+			ui,
+			crate::i18n::translate("voice-audience-header"),
+			13.0,
+		));
+		ui.separator();
+		egui::ScrollArea::vertical()
+			.id_salt("voice-viewer-roster")
+			.max_height(240.0)
+			.show(ui, |ui| {
+				let channel = state.voice.active.as_ref().map(|call| call.channel);
+				let guild = state.voice.active.as_ref().and_then(|call| call.guild);
+				for id in &audience.ids {
+					// The same lookup that decides what to fetch; otherwise the fetched base
+					// identity, and finally the fallback label.
+					let known = channel.and_then(|channel| viewer_user(state, channel, guild, *id));
+					let fetched = audience.users.iter().find(|user| user.id == *id);
+					let name = known
+						.map(|user| user.name.clone())
+						.or_else(|| fetched.map(|user| user.name.clone()))
+						.unwrap_or_else(|| crate::i18n::translate("voice-audience-unknown"));
+					// Only the fetched identity's display fields are retained; the rest of the
+					// user object stays at its defaults because nothing here reads it.
+					let fetched_user = fetched.map(|user| model::User {
+						kind: Default::default(),
+						webhook: false,
+						id: user.id,
+						name: user.name.clone(),
+						avatar: user.avatar.clone(),
+						discriminator: user.discriminator,
+						primary_guild: None,
+						cosmetics: None,
+					});
+					let user = known.or(fetched_user.as_ref());
+					ui.horizontal(|ui| {
+						match user {
+							Some(user) => {
+								self.avatars.show_quiet(ui, user, 20.0, state.demo);
+							}
+							None => {
+								let (rect, _) = ui.allocate_exact_size(
+									egui::Vec2::splat(20.0),
+									egui::Sense::hover(),
+								);
+								design::paint_avatar(ui, &name, 20.0, rect);
+							}
+						}
+						ui.label(RichText::new(name).size(13.0));
+					});
+				}
+			});
+		let missing = usize::from(audience.count).saturating_sub(audience.ids.len());
+		if missing > 0 {
+			ui.label(
+				RichText::new(crate::i18n::translate_count(
+					"voice-audience-more",
+					missing,
+					&[],
+				))
+				.size(12.0)
+				.color(design::palette(ui).muted),
+			);
+		}
+	}
+
+	fn paint_paused_preview(ui: &egui::Ui, rect: egui::Rect) {
+		ui.painter().rect_filled(rect, 8, egui::Color32::BLACK);
+		let width = (rect.width() - 48.0).max(40.0);
+		let title_size = if rect.height() < 160.0 { 16.0 } else { 22.0 };
+		let body_size = if rect.height() < 160.0 { 13.0 } else { 16.0 };
+		let title = ui.painter().layout(
+			crate::i18n::translate("screen-preview-paused-title"),
+			egui::FontId::new(title_size, design::semibold_family(ui.ctx())),
+			egui::Color32::WHITE,
+			width,
+		);
+		let body = ui.painter().layout(
+			crate::i18n::translate("screen-preview-paused-body"),
+			egui::FontId::proportional(body_size),
+			STAGE_MUTED,
+			width,
+		);
+		let gap = 8.0;
+		let top = rect.center().y - (title.size().y + gap + body.size().y) / 2.0;
+		let title_height = title.size().y;
+		ui.painter().galley(
+			egui::pos2(rect.center().x - title.size().x / 2.0, top),
+			title,
+			egui::Color32::WHITE,
+		);
+		ui.painter().galley(
+			egui::pos2(
+				rect.center().x - body.size().x / 2.0,
+				top + title_height + gap,
+			),
+			body,
+			STAGE_MUTED,
+		);
 	}
 
 	/// The screen share this device chose to watch: the latest decoded picture or a status.
@@ -4679,6 +4881,29 @@ fn resolve_member<'a>(
 		.or_else(|| user.map(|u| u.name.as_str()))
 		.unwrap_or("Participant");
 	(user, name)
+}
+
+/// Resolve one own-stream viewer: self, a conversation recipient, the voice roster (including
+/// its member window) and finally the loaded guild member list.
+///
+/// Both the fetch decision and the drawn row use this, so they never disagree about which
+/// names are already known locally.
+fn viewer_user(state: &State, channel: Id, guild: Option<Id>, user: Id) -> Option<&model::User> {
+	// `participant_user` already covers self, DM recipients and roster members.
+	participant_user(state, channel, user).or_else(|| {
+		state
+			.members
+			.as_ref()
+			.filter(|list| list.guild == guild)
+			.and_then(|list| {
+				list.slots.iter().flatten().find_map(|slot| match slot {
+					model::MemberSlot::Person(member) if member.user.id == user => {
+						Some(&member.user)
+					}
+					_ => None,
+				})
+			})
+	})
 }
 
 /// Find a call participant's user from self, DM recipients or the roster.

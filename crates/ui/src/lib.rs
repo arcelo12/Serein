@@ -14,6 +14,7 @@ mod attachments;
 pub mod external_upload;
 pub use attachments::DownloadUi;
 mod avatars;
+mod resample;
 #[cfg(feature = "demo")]
 pub use avatars::media::debug_heic_layout_check;
 pub use avatars::media::{Lane, MAX_FRAMES, Motion, Rendition, Size, fit_edge, is_motion_video};
@@ -4489,6 +4490,8 @@ impl MessagingUi {
 			self.navigate_history(state, &mut commands, back);
 		}
 		// Fullscreen media owns the whole client surface, including during native resizing.
+		// The viewer fetch still runs before it: a share's roster must resolve even then.
+		self.request_missing_viewers(state, &mut commands);
 		if self.show_fullscreen_voice(ui.ctx(), state) {
 			ui.painter()
 				.rect_filled(ui.max_rect(), 0, egui::Color32::BLACK);

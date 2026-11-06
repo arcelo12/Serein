@@ -2270,6 +2270,12 @@ screen-body-include-the-pointer-in-the-shared-video = Include the pointer in the
 # Context: body
 screen-body-quality = Quality
 # Context: body
+screen-body-source = Source
+# Context: body
+screen-preview-paused-title = Your stream is still running!
+# Context: body
+screen-preview-paused-body = We've paused this preview to save your resources.
+# Context: body
 screen-body-quality-selection-does-not-require-nitro = Quality selection does not require Nitro.
 # Context: body
 screen-body-refresh = Refresh
@@ -4985,3 +4991,23 @@ new-message-hint = Add friends to start a direct message or a group.
 new-message-no-people-found = No one matches that search.
 new-message-create = Create Message
 new-message-cancel = Cancel
+
+## crates/ui/src/voice.rs
+# Context: viewer_badge
+voice-audience-viewers =
+    { $count ->
+        [one] { $count } viewer
+       *[other] { $count } viewers
+    }
+# Context: viewer_badge
+voice-audience-no-viewers = No viewers
+# Context: viewer_roster
+voice-audience-header = Watching your stream
+# Context: viewer_roster
+voice-audience-unknown = Unknown viewer
+# Context: viewer_roster
+voice-audience-more =
+    { $count ->
+        [one] and { $count } more
+       *[other] and { $count } more
+    }
